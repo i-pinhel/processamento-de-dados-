@@ -1,0 +1,405 @@
+
+
+@author: Michelle, isadora
+
+import numpy as np
+import matplotlib.pyplot as plt   
+#Fixed usage of latex as True
+plt.rcParams['text.usetex'] = False
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+
+from matplotlib.patches import Rectangle
+import os
+import scipy.ndimage
+from matplotlib.patches import Ellipse, Circle
+from lmfit import Model, Parameters
+import sys
+import matplotlib.gridspec as gridspec
+from pathlib import Path
+from numpy import arange
+import h5py
+import data_paths
+import matplotlib
+matplotlib.use('Agg')
+
+# from rich import print as rprint
+
+#Initialize colorama
+# colorama.init(autoreset=True)
+# plt.style.use('matplotlibrc')   
+
+sys.path.append(str(Path(__file__).absolute().parent.parent))
+RESULTS_DIR = Path("Results")
+RESULTS_DIR.mkdir(exist_ok=True)
+
+import helper_funcs
+import cts
+
+
+#%%
+
+pre_crop       = 1      # crop images before fitting
+do_analysis = True
+
+# Select type of fitting
+
+Bimod2Drot     = 1      # Bimodal rotated fit
+Bimod1D        = 1
+
+# The size we want to crop the cloud
+crop_size = [400,400] #pixeis
+
+images_dic = { 'xz45': {'shot1': 'atoms', 'shot2': 'probe', 'shot3': 'background'}}
+
+#fator de calibração tamanho do pixel / magnificação
+cal = 1.786e-6
+
+kB = 1.380649e-23  
+m = 1.44316060e-25  
+
+# constantes
+sigma0 = (3/2/np.pi)*780e-9**2
+
+# valores maximo e minimo para plotar OD
+fullOD_high = 8.0
+fullOD_low = 0.0
+
+
+#%%
+
+
+hold_time_vec = []
+raiox_vec = []
+raiox_std_vec =[]
+raioy_vec = []
+raioy_std_vec = []
+fraction_vec=[]
+fraction_std_vec=[]
+sigx_vec=[]
+sigx_std_vec=[]
+sigy_vec=[]
+sigy_std_vec=[]
+atom_number_vec=[]
+atom_number_std_vec=[]
+time_of_flight = []
+
+
+
+for folder in data_paths.data_batch:
+
+    split_folder = folder.split('\\')
+    scan_folder = Path(data_paths.data_directory)/split_folder[0]/split_folder[1]/split_folder[2]
+    
+    # scan_folder = data_folder/folder
+    filename_vec = []
+    rep_vec = []
+    batch_fraction_vec=[]
+    batch_sigx_vec=[]
+    batch_sigy_vec=[]
+    batch_raiox_vec=[]
+    batch_raioy_vec=[]
+    batch_atom_number_vec=[]
+
+    
+    for file in os.listdir(scan_folder):
+        if file.endswith(".h5"):
+            with h5py.File(os.path.join(scan_folder,file), 'r') as h5_file:
+                filename_vec.append(os.path.join(scan_folder,file))
+                # rep_vec.append(h5_file['globals'].attrs['repN'])
+                # hold_time = h5_file['globals'].attrs['holdtimeExc']
+                # exc_amp = h5_file['globals'].attrs['amplitudeExc']
+                # time_tof = h5_file['globals'].attrs['time_flight']
+                time_of_flight.append(np.round(h5_file['globals'].attrs['time_flight'],5))
+                
+
+    for k in range(len(filename_vec)):
+        file = filename_vec[k]
+        with h5py.File(file, 'r') as h5_file:
+            images, do_analysis = helper_funcs.get_images(images_dic, file)
+            if do_analysis ==True: 
+                print(file)
+                
+
+                atoms = images[list(images_dic.keys())[0]][list(list(images_dic.values())[0].values())[0]]
+                probe = images[list(images_dic.keys())[0]][list(list(images_dic.values())[0].values())[1]]
+                background = images[list(images_dic.keys())[0]][list(list(images_dic.values())[0].values())[2]]
+                
+                od = helper_funcs.get_OD(atoms, probe, background)
+                od = od[200:od.shape[0]-100,400:od.shape[1]-150]
+                od = np.pad(od, pad_width=400)
+                # od[od<=0]= 1e-5
+                # od = od/np.max(od)
+
+                """  find center for imaging using pickpeak"""
+                meanx_roi = np.sum(od,0)
+                meany_roi = np.sum(od,1)
+                peaksx, peaksposx = helper_funcs.pickpeak(meanx_roi,15)
+                peaksy, peaksposy = helper_funcs.pickpeak(meany_roi,15)
+                
+                if pre_crop:
+                    xlow = int(np.mean(peaksposx)-crop_size[0]/2)
+                    ylow = int(np.mean(peaksposy)-crop_size[1]/2)
+                    xhigh = int(np.mean(peaksposx)+crop_size[0]/2)
+                    yhigh = int(np.mean(peaksposy)+crop_size[1]/2)
+
+                    xROI = np.arange(xlow,xhigh)
+                    yROI = np.arange(ylow,yhigh)
+                    roi = od[yROI,:]
+                    roi = roi[:,xROI]
+                    # roi = roi/np.max(roi)
+                else:
+                    xlow = 0
+                    ylow = 0
+                    xhigh = od.shape[1]
+                    yhigh = od.shape[0]
+                    xROI = np.arange(xlow,xhigh)
+                    yROI = np.arange(ylow,yhigh)
+                    roi = od[yROI,:]
+                    roi = roi[:,xROI]
+                    # roi=roi/np.max(roi)
+                
+                figureaxis = (xlow, xhigh, yhigh, ylow)
+                x,y = np.meshgrid(xROI, yROI)
+                
+                ####################### do analysis #######################
+
+                peaksx, peaksposx = helper_funcs.pickpeak(np.sum(roi,0),15)
+                peaksy, peaksposy = helper_funcs.pickpeak(np.sum(roi,1),15)
+                        
+                pars = Parameters()
+                pars.add('cenx', value = np.mean(peaksposx)+xlow, vary = True, min = 0)
+                pars.add('ceny', value = np.mean(peaksposy)+ylow, vary = True, min = 0)
+                pars.add('rx', value = 50, vary = True, max = 200,min = 20.0)
+                pars.add('ry', value = 80, vary = True, max = 250,min = 20.0)
+                pars.add('offset', value = 0, vary = True)
+                
+                if Bimod2Drot:
+                    pars.add('ampc', value = 0.7, vary = True, min = 0.0,max = 1)
+                    pars.add('ampg', value = 0.1, vary = True, min = 0.0, max = 0.3)
+                    pars.add('sigmax', value = 80, vary = True,min = 30.0,max =350)
+                    pars.add('sigmay', value = 100, vary = True,min = 30.0,max =400)
+                    pars.add('angle', value = 0, vary = True, max = 15.0, min = -15.0)
+                    
+                    Bimodal2Drotmodel = Model(helper_funcs.bimodal2Drot)
+                    fitBimod2D = Bimodal2Drotmodel.fit(roi.ravel(), params = pars, xy = (x,y))
+                    res = fitBimod2D.best_values
+                    data_fitted = fitBimod2D.best_fit.reshape(roi.shape[0],roi.shape[1])
+                    print(fitBimod2D.fit_report(modelpars=None, show_correl=False, min_correl=0.1, sort_pars=False))
+                    cloud_center = (res['cenx'],res['ceny'])
+                    res['angle'] = 0
+                    od_rot = helper_funcs.rotate_image(od, res['angle'],cloud_center)
+                    print("Angle rotated: %1.2f" %(res['angle']))
+                    
+                    xlow = int(res['cenx']-crop_size[0]/2)
+                    ylow = int(res['ceny']-crop_size[1]/2)
+                    xhigh = int(res['cenx']+crop_size[0]/2)
+                    yhigh = int(res['ceny']+crop_size[1]/2)
+
+                    xROI = np.arange(xlow,xhigh)
+                    yROI = np.arange(ylow,yhigh)
+                    roi_rot = od_rot[yROI,:]
+                    roi_rot = roi_rot[:,xROI]
+                    
+                    
+
+                    
+                    
+                atom_number = np.sum(roi)*(cal**2)/sigma0
+                print('Number of atoms: ',atom_number)
+                batch_atom_number_vec.append(atom_number)
+
+
+                sliceHalfWid = 10
+                x1D_distribution = np.mean(roi_rot[int(roi_rot.shape[0]/2-sliceHalfWid):int(roi_rot.shape[0]/2+sliceHalfWid), :],axis = 0)
+                y1D_distribution = np.mean(roi_rot[:,int(roi_rot.shape[1]/2-sliceHalfWid):int(roi_rot.shape[1]/2+sliceHalfWid)],axis = 1)
+                x1D_distribution_fit = np.mean(data_fitted[int(data_fitted.shape[0]/2-sliceHalfWid):int(data_fitted.shape[0]/2+sliceHalfWid), :],axis = 0)
+                y1D_distribution_fit = np.mean(data_fitted[:,int(data_fitted.shape[1]/2-sliceHalfWid):int(data_fitted.shape[1]/2+sliceHalfWid)],axis = 1)
+                x1D=np.linspace(0,np.size(x1D_distribution),np.size(x1D_distribution))
+                y1D=np.linspace(0,np.size(y1D_distribution),np.size(y1D_distribution))
+
+                if Bimod1D ==True:
+                    parsx=Parameters()
+                    parsx.add('ampc', value =0.7*np.max(x1D_distribution),vary=True,min=0)
+                    parsx.add('rx', value =0.2*np.size(x1D_distribution),vary=True,min=0)
+                    parsx.add('ampg',value=0.5*np.max(x1D_distribution),vary=True,min=0)
+                    parsx.add('sigma',value=0.4*np.size(x1D_distribution),vary=True,min=0)
+                    parsx.add('cen',value=crop_size[0]/2,vary=True)
+                    parsx.add('offset',value=np.min(x1D_distribution),vary=True)
+                    
+                    parsy=Parameters()
+                    parsy.add('ampc', value =0.7*np.max(y1D_distribution),vary=True,min=0)
+                    parsy.add('rx', value =0.2*np.size(y1D_distribution),vary=True,min=0)
+                    parsy.add('ampg',value=0.5*np.max(y1D_distribution),vary=True,min=0)
+                    parsy.add('sigma',value=0.4*np.size(y1D_distribution),vary=True,min=0)
+                    parsy.add('cen',value=crop_size[1]/2,vary=True)
+                    parsy.add('offset',value=np.min(y1D_distribution),vary=True)
+                    
+                    Bimodal1Dmodel = Model(helper_funcs.bimodal1D)
+                    fitBimod1Dx = Bimodal1Dmodel.fit(x1D_distribution, params = parsx, x=x1D)
+                    resx = fitBimod1Dx.best_values
+                    data_fittedx = fitBimod1Dx.best_fit.reshape(x1D_distribution.shape[0])
+                    print('x:',fitBimod1Dx.fit_report(modelpars=None, show_correl=False, min_correl=0.1, sort_pars=False))
+                    fitBimod1Dy = Bimodal1Dmodel.fit(y1D_distribution, params = parsy, x=y1D)
+                    resy = fitBimod1Dy.best_values
+                    data_fittedy = fitBimod1Dy.best_fit.reshape(y1D_distribution.shape[0])
+                    print('y:',fitBimod1Dy.fit_report(modelpars=None, show_correl=False, min_correl=0.1, sort_pars=False))
+                    
+                    resx_gaussian = helper_funcs.gaussian1D(x1D,resx['ampg'],resx['cen'],resx['sigma'],resx['offset'])
+                    resy_gaussian = helper_funcs.gaussian1D(y1D,resy['ampg'],resy['cen'],resy['sigma'],resy['offset'])
+                    resx_bimod = helper_funcs.bimodal1D(x1D,resx['ampg'],resx['ampc'],resx['cen'],resx['sigma'],resx['rx'],resx['offset'])
+                    resy_bimod = helper_funcs.bimodal1D(y1D,resy['ampg'],resy['ampc'],resy['cen'],resy['sigma'],resy['rx'],resy['offset'])
+                    Ngy=np.trapezoid(resy_gaussian,y1D)
+                    Ngx=np.trapezoid(resx_gaussian,x1D)
+                    Nty=np.trapezoid(data_fittedy,y1D)
+                    Ntx=np.trapezoid(data_fittedx,x1D)
+                    
+                    cfracx = 1-(Ngx/Ntx)
+                    cfracy = 1-(Ngy/Nty)
+                    cfrac = (cfracx+cfracy)/2
+                    batch_fraction_vec.append(cfrac)
+                    
+                    batch_sigx_vec.append(res['sigmax']*cal)
+                    batch_sigy_vec.append(res['sigmay']*cal)
+                    batch_raiox_vec.append(res['rx']*cal)
+                    batch_raioy_vec.append(res['ry']*cal)
+
+                opticaldensity = np.copy(roi_rot)
+                ndensity = (opticaldensity/sigma0)          # distribuição de densidade (m**-2)
+                num_roi_crop  = np.sum(ndensity*cal**2)                   # número de átomos
+                norm_ndensity= ndensity/num_roi_crop        # normalização    
+                # """  Showing plots  """
+
+                # fig = plt.figure()
+                # gs = gridspec.GridSpec(2, 2)
+                # gs.update(left=0.08, right=0.92, top = 0.93, bottom=0.08, wspace=0.2, hspace=0.35)
+                # plt.suptitle(r'2D Bimodal fit (rotated)', fontsize=14)
+                # ax0 = plt.subplot(gs[0, 0:1])
+                # ax1 = plt.subplot(gs[0, 1:2])
+                # ax2 = plt.subplot(gs[1, 0:1])
+                # ax3 = plt.subplot(gs[1, 1:2], projection='3d')
+                # rep = h5_file['globals'].attrs['repN']
+                # ax0.imshow(roi_rot.reshape(roi_rot.shape[0], roi_rot.shape[1]),vmin=fullOD_low,vmax=fullOD_high,extent=(figureaxis), cmap = 'jet',origin="upper")
+                # ellipse_fit = Ellipse((res['cenx'], res['ceny']), 2*res['rx'], 2*res['ry'], 
+                #             res['angle'], linestyle = '--', edgecolor = 'yellow',linewidth = 1.8, fill = False)
+                # center_fit = Circle((res['cenx'], res['ceny']),1, linewidth = 5,edgecolor = 'k',facecolor='none')
+                # ax0.add_patch(ellipse_fit)
+                # ax0.add_patch(center_fit)
+                # ax1.plot(y1D_distribution,yROI,'g--', label='y1D dist', linewidth = 2.0)
+                # ax1.plot(y1D_distribution_fit,yROI,'r', label='fit', linewidth = 1.0)
+                # ax1.plot(helper_funcs.gaussian1D(yROI,res['ampg'],res['ceny'], 
+                #                                     res['sigmay'],res['offset']),yROI,'k', label='gauss', linewidth = 1.0)
+                # # ax1.legend(loc='upper right', shadow=True, fontsize=7)
+                # ax2.plot(xROI, x1D_distribution,'b--', label='x1D dist', linewidth = 2.0)
+                # ax2.plot(xROI, x1D_distribution_fit,'r', label='fit', linewidth = 1.0)
+                # ax2.plot(xROI, helper_funcs.gaussian1D(xROI,res['ampg'],res['cenx'], 
+                #                                     res['sigmax'],res['offset']),'k', label='gauss', linewidth = 1.0)
+                # # ax2.legend(loc='upper right', shadow=True, fontsize=7)
+                # ax3.contour3D(x, y, data_fitted, 20, cmap='binary')
+                # ax3.contour3D(x, y, roi, 20)
+                # # plt.savefig('Fitbimodal_%1.1fVpp_%1.1fms_%1i.png'%(exc_amp,hold_time*1000,rep), dpi=600)
+                # plt.title(str(file[-38:-3]))
+                # plt.show()
+                
+                
+                """1D fitting plots"""
+                
+                _fig_=plt.figure('n(x,y)',figsize=(6.2,6.2))
+                pnl=gridspec.GridSpec(2,2,width_ratios=[1,3],height_ratios=[4,1.5],wspace=0.08, hspace=0.08)
+             
+                ##### OD Full #####
+                odFull=plt.Subplot(_fig_,pnl[1]);   _fig_.add_subplot(odFull)
+                imFull=odFull.imshow(ndensity*1e-12, vmin=fullOD_low, vmax=fullOD_high, cmap='inferno', interpolation='none')
+                plt.xticks([])
+                plt.yticks([])
+                plt.title('$n(x,y) \ \mu\mathrm{m}^{-2}$',fontsize=14)
+
+             
+                cax=plt.axes([0.92, 0.34, 0.018, 0.56])
+                cbar=plt.colorbar(imFull,cax=cax)
+                # cbar.set_label('$n(x,y)$',fontsize=12)
+                cbar.ax.tick_params(labelsize=12)
+                
+             
+                ##### OD x #####
+                odx=plt.Subplot(_fig_,pnl[3]);      _fig_.add_subplot(odx)
+                odx.plot((x1D-200)*cal*1e6,x1D_distribution,'ko',linewidth=2.8) # x 1e6 para mostrar a figura em microns
+                odx.plot((x1D-200)*cal*1e6,data_fittedx,'tab:red',linewidth=2.4)
+                odx.plot((x1D-200)*cal*1e6,resx_gaussian,'tab:blue',linewidth=1.8)
+                # odx.axvline(x=resx['mu'],linewidth=0.95,linestyle='-')
+                odx.set_xlabel('x ($\mu\mathrm{m}$)',fontsize=12)
+                # odx.set_ylabel('$n(x)$',fontsize=12)
+                odx.yaxis.tick_right()
+                odx.yaxis.set_label_coords(1.05,0.5)
+                plt.xlim(np.min(x1D-200)*cal*1e6,np.max(x1D-200)*cal*1e6)
+                plt.ylim(0,1.1*np.max(x1D_distribution))
+                plt.yticks(fontsize=12)
+                plt.xticks(fontsize=12)
+             
+                ##### OD y #####
+                ody=plt.Subplot(_fig_,pnl[0]);      _fig_.add_subplot(ody)
+                ody.plot(y1D_distribution,(y1D-200)*cal*1e6,'ko',linewidth=2.8)
+                ody.plot(data_fittedy,(y1D-200)*cal*1e6,'tab:red',linewidth=2.4)
+                ody.plot(resy_gaussian,(y1D-200)*cal*1e6,'tab:blue',linewidth=1.8)
+                # ody.axhline(y=resy['mu'],linewidth=0.65,linestyle='-')
+                ody.set_ylabel('y ($\mu\mathrm{m}$)',fontsize=12)
+                # ody.set_xlabel('$n(y)$',fontsize=12)
+                ody.xaxis.set_label_coords(0.5,1.05)
+                # ody.invert_xaxis()
+                plt.ylim(np.max(y1D-200)*cal*1e6,np.min(y1D-200)*cal*1e6)
+                plt.xlim(0,1.1*np.max(y1D_distribution))
+                plt.yticks(fontsize=12)
+                plt.xticks(fontsize=12)
+                
+                plt.subplots_adjust(top=0.905, bottom=0.090, left=0.12, right=0.900, 
+                                hspace=0.0, wspace=0.0)
+                # plt.tight_layout()
+                # plt.savefig('D:/BEC I Rb/Artigo Termometria/Fitting_bimodal_%1.2fVpp_%1.2fms_num%i.pdf'%(exc_amp,hold_time*1000,k), dpi=600, bbox_inches='tight')
+                plt.savefig(RESULTS_DIR / f'figure_{Path(file).stem}.png')
+                plt.close()
+          
+
+    # fraction_vec.append(np.mean(batch_fraction_vec))
+    # fraction_std_vec.append(np.std(batch_fraction_vec))
+    # sigx_vec.append(np.mean(batch_sigx_vec))
+    # sigx_std_vec.append(np.std(batch_sigx_vec))
+    # sigy_vec.append(np.mean(batch_sigy_vec))
+    # sigy_std_vec.append(np.std(batch_sigy_vec))
+    # raiox_vec.append(np.mean(batch_raiox_vec))
+    # raiox_std_vec.append(np.std(batch_raiox_vec))
+    # raioy_vec.append(np.mean(batch_raioy_vec))
+    # raioy_std_vec.append(np.std(batch_raioy_vec))
+    # hold_time_vec.append(hold_time)
+    atom_number_vec.append(np.mean(batch_atom_number_vec))
+    atom_number_std_vec.append(np.std(batch_atom_number_vec))
+    
+   # ... (fim do loop "for folder in data_paths.data_batch:")
+    
+    # Essas linhas já existem no seu código:
+    sigx_vec.append(batch_sigx_vec)
+    sigy_vec.append(batch_sigy_vec)
+    # time_of_flight.append(time_tof) 
+ 
+print('sigx_vec = ',sigx_vec)
+print('sigy_vec = ',sigy_vec)
+print('tof = ',time_of_flight)
+
+# --- ADICIONE O CÓDIGO AQUI (SEM INDENTAÇÃO) ---
+
+sigx_flat = np.concatenate(sigx_vec)
+sigy_flat = np.concatenate(sigy_vec)
+tof_arr = np.array(time_of_flight)
+
+# Verificação de segurança
+if len(tof_arr) != len(sigx_flat):
+    print(f"Aviso: Tamanhos diferentes! TOF: {len(tof_arr)}, Sigma: {len(sigx_flat)}")
+    # Ajusta o tamanho do TOF para casar com os dados analisados
+    tof_arr = tof_arr[:len(sigx_flat)] 
+
+# Obter os índices ordenados
+sort_order = np.argsort(tof_arr)
+
+# Agora você pode plotar usando: tof_arr[sort_order] e sigx_flat[sort_order]
+print('sigx_vec = ',sigx_vec)
+print('sigy_vec = ',sigy_vec)
+print('tof = ',time_of_flight)
